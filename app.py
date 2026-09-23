@@ -32,10 +32,10 @@ st.subheader("2. Lista de vidrios a optimizar")
 
 if "pedidos" not in st.session_state:
     st.session_state.pedidos = [
-        {"etiqueta": "Ventana A", "ancho": 1200, "alto": 800, "cantidad": 4},
-        {"etiqueta": "Mampara B", "ancho": 1500, "alto": 1000, "cantidad": 2},
-        {"etiqueta": "Fijo C", "ancho": 600, "alto": 400, "cantidad": 6},
-        {"etiqueta": "Puerta D", "ancho": 2000, "alto": 900, "cantidad": 2},
+        {"etiqueta": "V1", "ancho": 1190, "alto": 665, "cantidad": 1},
+        {"etiqueta": "V1", "ancho": 1160, "alto": 650, "cantidad": 2},
+        {"etiqueta": "V1", "ancho": 2300, "alto": 350, "cantidad": 1},
+        {"etiqueta": "V1", "ancho": 665, "alto": 1190, "cantidad": 1},
     ]
 
 # Tabla interactiva para modificar/agregar piezas
@@ -52,7 +52,7 @@ edited_data = st.data_editor(
 )
 
 # ---------------------------------------------------------
-# FUNCIONES DE OPTIMIZACIÓN Y GRÁFICOS
+# FUNCIONES DE OPTIMIZACIÓN Y GRÁFICOS (MODIFICADAS)
 # ---------------------------------------------------------
 def optimizar_cortes(plancha_w, plancha_h, max_bins, rotacion, pedidos):
     packer = newPacker(rotation=rotacion)
@@ -67,7 +67,8 @@ def optimizar_cortes(plancha_w, plancha_h, max_bins, rotacion, pedidos):
         cant = int(item.get("cantidad") or 1)
         if w > 0 and h > 0:
             for _ in range(cant):
-                packer.add_rect(w, h, rid=tag)
+                # El pack_id guarda la medida original como (w, h)
+                packer.add_rect(w, h, rid=tag, pack_id=(w, h))
 
     packer.pack()
     return packer
@@ -83,7 +84,11 @@ def generar_imagen_plano(abin, plancha_w, plancha_h, num_plancha):
     color_idx = 0
 
     for rect in abin:
-        x, y, w, h, rid = rect.x, rect.y, rect.width, rect.height, rect.rid
+        # rect.x, rect.y, rect.width, rect.height son las medidas en la plancha
+        x, y, w, h = rect.x, rect.y, rect.width, rect.height
+        rid = rect.rid
+        w_orig, h_orig = rect.pack_id  # Medida original que ingresó el usuario
+        
         area_usada += (w * h)
 
         if rid not in tag_color_map:
@@ -93,10 +98,20 @@ def generar_imagen_plano(abin, plancha_w, plancha_h, num_plancha):
         rect_pieza = patches.Rectangle((x, y), w, h, linewidth=1.2, edgecolor='#1E1E1E', facecolor=tag_color_map[rid], alpha=0.85)
         ax.add_patch(rect_pieza)
 
+        # Determinar el texto a mostrar
+        if (w == w_orig and h == h_orig):
+            # No hubo rotación. Mostrar medida original.
+            texto_medidas = f"Corte: {w} x {h} mm"
+        else:
+            # Hubo rotación (el algoritmo giró la pieza 90°)
+            # El orden de w y h en la plancha es diferente al original.
+            # Mostramos primero la medida de corte (cómo se ve) y luego la original como referencia.
+            texto_medidas = f"Corte: {w} x {h} mm\n(Orig: {w_orig}x{h_orig})"
+
         ax.text(
-            x + w/2, y + h/2, f"{rid}\n{w}x{h} mm",
-            color='white', weight='bold', fontsize=7, ha='center', va='center',
-            bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.4)
+            x + w/2, y + h/2, f"{rid}\n{texto_medidas}",
+            color='white', weight='bold', fontsize=8, ha='center', va='center',
+            bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.5)
         )
 
     aprovechamiento = (area_usada / (plancha_w * plancha_h)) * 100
@@ -118,7 +133,7 @@ def generar_imagen_plano(abin, plancha_w, plancha_h, num_plancha):
     return buf, aprovechamiento, merma
 
 # ---------------------------------------------------------
-# FUNCIÓN DE GENERACIÓN DE PDF (REPORTLAB)
+# FUNCIÓN DE GENERACIÓN DE PDF (MODIFICADA PARA MOSTRAR CORTE)
 # ---------------------------------------------------------
 def generar_pdf_reporte(packer, plancha_w, plancha_h):
     pdf_buffer = io.BytesIO()
@@ -149,7 +164,7 @@ def generar_pdf_reporte(packer, plancha_w, plancha_h):
     return pdf_buffer
 
 # ---------------------------------------------------------
-# BOTÓN Y EJECUCIÓN
+# BOTÓN Y EJECUCIÓN (CON EL CAMBIO DE use_container_width)
 # ---------------------------------------------------------
 if st.button("🚀 Optimizar Cortes y Generar Informe", type="primary"):
     with st.spinner("Calculando plano óptimo de corte..."):
