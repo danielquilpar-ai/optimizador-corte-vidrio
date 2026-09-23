@@ -1,7 +1,7 @@
 import io
 import streamlit as st
 import rectpack
-from rectpack import newPacker
+from rectpack import PackingMode, PackingBin, newPacker, GuillotineBssfSas, GuillotineSplitSlas
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
@@ -14,7 +14,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 # CONFIGURACIÓN DE LA PÁGINA WEB
 # ---------------------------------------------------------
 st.set_page_config(page_title="Optimizador de Corte de Vidrio", layout="wide")
-st.title("🪟 Optimizador de Corte de Vidrio y Generador de PDF")
+st.title("🪟 Optimizador de Corte de Vidrio profesional")
 
 # ---------------------------------------------------------
 # BARRA LATERAL: INGRESO DE DATOS DE LA PLANCHA MADRE
@@ -52,10 +52,16 @@ edited_data = st.data_editor(
 )
 
 # ---------------------------------------------------------
-# FUNCIONES DE OPTIMIZACIÓN Y GRÁFICOS (MODIFICADAS)
+# FUNCIONES DE OPTIMIZACIÓN Y GRÁFICOS
 # ---------------------------------------------------------
 def optimizar_cortes(plancha_w, plancha_h, max_bins, rotacion, pedidos):
-    packer = newPacker(rotation=rotacion)
+    # Usamos el modo Guillotina (Corte de vidrio real de lado a lado)
+    packer = newPacker(
+        mode=PackingMode.Selecting,
+        pack_algo=GuillotineBssfSas,
+        split_algo=GuillotineSplitSlas,
+        rotation=rotacion
+    )
     packer.add_bin(plancha_w, plancha_h, count=max_bins)
 
     for item in pedidos:
@@ -67,15 +73,20 @@ def optimizar_cortes(plancha_w, plancha_h, max_bins, rotacion, pedidos):
         cant = int(item.get("cantidad") or 1)
         if w > 0 and h > 0:
             for _ in range(cant):
-                # El pack_id guarda la medida original como (w, h)
-                packer.add_rect(w, h, rid=tag, pack_id=(w, h))
+                rid_info = f"{tag}|{w}|{h}"
+                packer.add_rect(w, h, rid=rid_info)
 
     packer.pack()
     return packer
 
 def generar_imagen_plano(abin, plancha_w, plancha_h, num_plancha):
-    fig, ax = plt.subplots(figsize=(10, 6))
-    rect_madre = patches.Rectangle((0, 0), plancha_w, plancha_h, linewidth=2, edgecolor='black', facecolor='#F0F2F6')
+    fig, ax = plt.subplots(figsize=(11, 7))
+
+    # Ocultar ejes X / Y tradicionales
+    ax.axis('off')
+
+    # Plancha Madre Base
+    rect_madre = patches.Rectangle((0, 0), plancha_w, plancha_h, linewidth=2, edgecolor='black', facecolor='#F5F6F8')
     ax.add_patch(rect_madre)
 
     colores = ['#4E79A7', '#F28E2B', '#E15759', '#76B7B2', '#59A14F', '#EDC948', '#B07AA1']
@@ -83,57 +94,96 @@ def generar_imagen_plano(abin, plancha_w, plancha_h, num_plancha):
     tag_color_map = {}
     color_idx = 0
 
+    cortes_x = set([0, plancha_w])
+    cortes_y = set([0, plancha_h])
+
     for rect in abin:
-        # rect.x, rect.y, rect.width, rect.height son las medidas en la plancha
         x, y, w, h = rect.x, rect.y, rect.width, rect.height
-        rid = rect.rid
-        w_orig, h_orig = rect.pack_id  # Medida original que ingresó el usuario
         
+        cortes_x.add(x)
+        cortes_x.add(x + w)
+        cortes_y.add(y)
+        cortes_y.add(y + h)
+
+        rid_str = str(rect.rid)
+        if "|" in rid_str:
+            parts = rid_str.split("|")
+            rid = parts[0]
+            w_orig, h_orig = int(parts[1]), int(parts[2])
+        else:
+            rid = rid_str
+            w_orig, h_orig = w, h
+
         area_usada += (w * h)
 
         if rid not in tag_color_map:
             tag_color_map[rid] = colores[color_idx % len(colores)]
             color_idx += 1
 
+        # Pieza trazada
         rect_pieza = patches.Rectangle((x, y), w, h, linewidth=1.2, edgecolor='#1E1E1E', facecolor=tag_color_map[rid], alpha=0.85)
         ax.add_patch(rect_pieza)
 
-        # Determinar el texto a mostrar
+        # Etiqueta de la pieza
         if (w == w_orig and h == h_orig):
-            # No hubo rotación. Mostrar medida original.
             texto_medidas = f"Corte: {w} x {h} mm"
         else:
-            # Hubo rotación (el algoritmo giró la pieza 90°)
-            # El orden de w y h en la plancha es diferente al original.
-            # Mostramos primero la medida de corte (cómo se ve) y luego la original como referencia.
-            texto_medidas = f"Corte: {w} x {h} mm\n(Orig: {w_orig}x{h_orig})"
+            texto_medidas = f"Corte: {w} x {h} mm\n(Rotado, Orig: {w_orig}x{h_orig})"
 
         ax.text(
             x + w/2, y + h/2, f"{rid}\n{texto_medidas}",
             color='white', weight='bold', fontsize=8, ha='center', va='center',
-            bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.5)
+            bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.6)
         )
+
+    # ---------------------------------------------------------
+    # PROYECCIÓN DE LÍNEAS ROJAS DE CORTE CONTINUO (GUILLOTINA)
+    # ---------------------------------------------------------
+    for cx in sorted(cortes_x):
+        if 0 < cx < plancha_w:
+            ax.plot([cx, cx], [0, plancha_h], color='red', linestyle='--', linewidth=1, alpha=0.75)
+
+    for cy in sorted(cortes_y):
+        if 0 < cy < plancha_h:
+            ax.plot([0, plancha_w], [cy, cy], color='red', linestyle='--', linewidth=1, alpha=0.75)
+
+    # ---------------------------------------------------------
+    # ACOTADO TÉCNICO (MEDIDAS GENERALES DE LA PLANCHA)
+    # ---------------------------------------------------------
+    margin_x = plancha_w * 0.08
+    margin_y = plancha_h * 0.08
+
+    # Cota Ancho Plancha (Abajo)
+    ax.annotate(
+        '', xy=(0, -margin_y*0.4), xytext=(plancha_w, -margin_y*0.4),
+        arrowprops=dict(arrowstyle='<->', color='black', lw=1.5)
+    )
+    ax.text(plancha_w/2, -margin_y*0.7, f"Ancho Plancha: {plancha_w} mm", ha='center', va='top', fontsize=10, fontweight='bold')
+
+    # Cota Alto Plancha (Izquierda)
+    ax.annotate(
+        '', xy=(-margin_x*0.4, 0), xytext=(-margin_x*0.4, plancha_h),
+        arrowprops=dict(arrowstyle='<->', color='black', lw=1.5)
+    )
+    ax.text(-margin_x*0.7, plancha_h/2, f"Alto Plancha: {plancha_h} mm", ha='right', va='center', rotation=90, fontsize=10, fontweight='bold')
 
     aprovechamiento = (area_usada / (plancha_w * plancha_h)) * 100
     merma = 100 - aprovechamiento
 
-    ax.set_xlim(-100, plancha_w + 100)
-    ax.set_ylim(-100, plancha_h + 100)
+    ax.set_xlim(-margin_x*1.5, plancha_w + margin_x*0.5)
+    ax.set_ylim(-margin_y*1.5, plancha_h + margin_y*0.5)
     ax.set_aspect('equal')
-    plt.xlabel("Ancho (mm)")
-    plt.ylabel("Alto (mm)")
-    plt.title(f"Plancha #{num_plancha} — Aprovechamiento: {aprovechamiento:.2f}% | Merma: {merma:.2f}%", fontweight='bold')
-    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.title(f"Plancha #{num_plancha} — Aprovechamiento: {aprovechamiento:.2f}% | Merma: {merma:.2f}%", fontweight='bold', pad=15)
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=200)
+    plt.savefig(buf, format='png', dpi=200, bbox_inches='tight')
     plt.close(fig)
     buf.seek(0)
     return buf, aprovechamiento, merma
 
 # ---------------------------------------------------------
-# FUNCIÓN DE GENERACIÓN DE PDF (MODIFICADA PARA MOSTRAR CORTE)
+# FUNCIÓN DE GENERACIÓN DE PDF
 # ---------------------------------------------------------
 def generar_pdf_reporte(packer, plancha_w, plancha_h):
     pdf_buffer = io.BytesIO()
@@ -164,10 +214,10 @@ def generar_pdf_reporte(packer, plancha_w, plancha_h):
     return pdf_buffer
 
 # ---------------------------------------------------------
-# BOTÓN Y EJECUCIÓN (CON EL CAMBIO DE use_container_width)
+# BOTÓN Y EJECUCIÓN
 # ---------------------------------------------------------
 if st.button("🚀 Optimizar Cortes y Generar Informe", type="primary"):
-    with st.spinner("Calculando plano óptimo de corte..."):
+    with st.spinner("Calculando plano óptimo de corte guillotina..."):
         packer = optimizar_cortes(plancha_w, plancha_h, cantidad_planchas, permitir_rotacion, edited_data)
         
         planchas_usadas = [b for b in packer if len(b) > 0]
