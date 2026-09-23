@@ -55,11 +55,10 @@ edited_data = st.data_editor(
 # FUNCIONES DE OPTIMIZACIÓN Y GRÁFICOS
 # ---------------------------------------------------------
 def optimizar_cortes(plancha_w, plancha_h, max_bins, rotacion, pedidos):
-    # Usamos el modo Guillotina (Corte de vidrio real de lado a lado)
+    # Inicialización del algoritmo de empaquetado
     packer = newPacker(
         mode=PackingMode.Selecting,
-        pack_algo=GuillotineBssfSas,
-        split_algo=GuillotineSplitSlas,
+        pack_algo=rectpack.guillotine.GuillotineBssfSas if hasattr(rectpack, 'guillotine') else rectpack.MaxRectsBssf,
         rotation=rotacion
     )
     packer.add_bin(plancha_w, plancha_h, count=max_bins)
