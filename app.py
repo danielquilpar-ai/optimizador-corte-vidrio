@@ -54,6 +54,7 @@ st.subheader("3. Lista de vidrios a optimizar")
 
 if "pedidos" not in st.session_state:
     st.session_state.pedidos = [
+        {"etiqueta": "m4", "ancho": 1100, "alto": 2140, "cantidad": 1},
         {"etiqueta": "m3", "ancho": 750, "alto": 2189, "cantidad": 2},
     ]
 
@@ -84,13 +85,63 @@ class Rectangulo:
         self.orig_h = orig_h
         self.rotado = rotado
 
+def calcular_cortes_guillotina_recursivo(x0, y0, bw, bh, piezas):
+    """
+    Calcula de forma exacta las líneas de corte guillotina dentro de una sub-región,
+    evitando atravesar piezas ya consolidadas.
+    """
+    piezas_sub = [p for p in piezas if p.x >= x0 and p.y >= y0 and p.x + p.w <= x0 + bw and p.y + p.h <= y0 + bh]
+    if not piezas_sub:
+        return []
+
+    cortes = []
+
+    # 1. Buscar un corte vertical de lado a lado en el rango y0..y0+bh
+    xs_posibles = set()
+    for p in piezas_sub:
+        if p.x > x0 and p.x < x0 + bw:
+            xs_posibles.add(p.x)
+        if p.x + p.w > x0 and p.x + p.w < x0 + bw:
+            xs_posibles.add(p.x + p.w)
+
+    for x_c in sorted(xs_posibles):
+        # Verificar si el corte x_c no interseca el interior de ninguna pieza
+        se_puede = True
+        for p in piezas_sub:
+            if p.x < x_c < p.x + p.w:
+                se_puede = False
+                break
+        if se_puede:
+            cortes.append({"tipo": "V", "x": x_c, "y1": y0, "y2": y0 + bh})
+            cortes += calcular_cortes_guillotina_recursivo(x0, y0, x_c - x0, bh, piezas_sub)
+            cortes += calcular_cortes_guillotina_recursivo(x_c, y0, x0 + bw - x_c, bh, piezas_sub)
+            return cortes
+
+    # 2. Buscar un corte horizontal de lado a lado en el rango x0..x0+bw
+    ys_posibles = set()
+    for p in piezas_sub:
+        if p.y > y0 and p.y < y0 + bh:
+            ys_posibles.add(p.y)
+        if p.y + p.h > y0 and p.y + p.h < y0 + bh:
+            ys_posibles.add(p.y + p.h)
+
+    for y_c in sorted(ys_posibles):
+        se_puede = True
+        for p in piezas_sub:
+            if p.y < y_c < p.y + p.h:
+                se_puede = False
+                break
+        if se_puede:
+            cortes.append({"tipo": "H", "y": y_c, "x1": x0, "x2": x0 + bw})
+            cortes += calcular_cortes_guillotina_recursivo(x0, y0, bw, y_c - y0, piezas_sub)
+            cortes += calcular_cortes_guillotina_recursivo(x0, y_c, bw, y0 + bh - y_c, piezas_sub)
+            return cortes
+
+    return cortes
+
 def empaquetar_en_plancha(bin_w, bin_h, piezas, permitir_rot):
     piezas_colocadas = []
     piezas_no_colocadas = []
-    cortes_guillotina = []
-
-    max_x_bloque = 0
-    piezas_temp = []
     espacios_libres = [(0, 0, bin_w, bin_h)]
 
     for p in piezas:
@@ -106,11 +157,8 @@ def empaquetar_en_plancha(bin_w, bin_h, piezas, permitir_rot):
             for w_eval, h_eval, es_rot in orientaciones:
                 if w_eval <= ew and h_eval <= eh:
                     rect = Rectangulo(ex, ey, w_eval, h_eval, tag, pw, ph, es_rot)
-                    piezas_temp.append(rect)
+                    piezas_colocadas.append(rect)
                     espacios_libres.pop(idx_e)
-
-                    if ex + w_eval > max_x_bloque:
-                        max_x_bloque = ex + w_eval
 
                     if ew - w_eval > 0:
                         espacios_libres.append((ex + w_eval, ey, ew - w_eval, h_eval))
@@ -126,35 +174,11 @@ def empaquetar_en_plancha(bin_w, bin_h, piezas, permitir_rot):
         if not colocada:
             piezas_no_colocadas.append(p)
 
-    if not piezas_temp:
+    if not piezas_colocadas:
         return [], piezas, []
 
-    piezas_colocadas = piezas_temp
-
-    # CORTE V1 MAESTRO: Aísla el Retazo R1
-    if max_x_bloque < bin_w:
-        cortes_guillotina.append({
-            "tipo": "V",
-            "x": max_x_bloque,
-            "y1": 0,
-            "y2": bin_h,
-            "etiqueta_retazo": "R1"
-        })
-
-    # CORTES HORIZONTALES SECUNDARIOS
-    y_cortes = set()
-    for rect in piezas_colocadas:
-        if rect.y + rect.h < bin_h:
-            y_cortes.add(rect.y + rect.h)
-
-    for y_c in sorted(y_cortes):
-        cortes_guillotina.append({
-            "tipo": "H",
-            "y": y_c,
-            "x1": 0,
-            "x2": max_x_bloque,
-            "etiqueta_retazo": "R2"
-        })
+    # Generar cortes guillotina respetando las fronteras reales de cada sub-bloque
+    cortes_guillotina = calcular_cortes_guillotina_recursivo(0, 0, bin_w, bin_h, piezas_colocadas)
 
     return piezas_colocadas, piezas_no_colocadas, cortes_guillotina
 
@@ -174,7 +198,6 @@ def optimizar_corte_completo(plancha_w, plancha_h, max_planchas, permitir_rot, p
     piezas_pendientes.sort(key=lambda p: p["area"], reverse=True)
     planchas_usadas = []
 
-    # PASO 1: Procesar Retazos con el nombre asignado por el usuario
     if retazos:
         for ret in retazos:
             if not ret or not isinstance(ret, dict) or len(piezas_pendientes) == 0:
@@ -199,7 +222,6 @@ def optimizar_corte_completo(plancha_w, plancha_h, max_planchas, permitir_rot, p
                     })
                     piezas_pendientes = pendientes
 
-    # PASO 2: Procesar Planchas
     for i in range(max_planchas):
         if len(piezas_pendientes) == 0:
             break
@@ -255,7 +277,7 @@ def generar_imagen_plano(plancha_data, index_num):
             bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.65)
         )
 
-    # CORTES Y NUMERACIÓN EN AZUL
+    # DIBUJAR CORTES Y NUMERACIÓN DE SECUENCIA
     for num, c in enumerate(cortes, start=1):
         if c["tipo"] == "V":
             x = c["x"]
@@ -277,15 +299,12 @@ def generar_imagen_plano(plancha_data, index_num):
             ax.text(x2 + (b_w*0.015), y, str(num), color='white', weight='bold', fontsize=9, ha='center', va='center',
                     bbox=dict(boxstyle="circle,pad=0.3", fc="#0055FF", ec="black", lw=1))
 
-    # Identificación del Retazo R1
-    if len(cortes) > 0:
-        v_corte = next((c for c in cortes if c["tipo"] == "V"), None)
-        if v_corte:
-            x_r1 = (v_corte["x"] + b_w) / 2
-            y_r1 = b_h / 2
-            ancho_r1 = int(b_w - v_corte["x"])
-            if ancho_r1 > 100:
-                ax.text(x_r1, y_r1, f"RETAZO R1\n({ancho_r1} x {b_h} mm)", color='#888888', weight='bold', fontsize=12, ha='center', va='center')
+    # Identificar Retazo R1 libre a la derecha si existe
+    max_x_util = max([r.x + r.w for r in colocadas]) if colocadas else 0
+    if max_x_util < b_w:
+        ancho_r1 = int(b_w - max_x_util)
+        if ancho_r1 > 100:
+            ax.text((max_x_util + b_w)/2, b_h/2, f"RETAZO R1\n({ancho_r1} x {b_h} mm)", color='#888888', weight='bold', fontsize=12, ha='center', va='center')
 
     # Acotado exterior
     margin_x = b_w * 0.08
@@ -340,7 +359,6 @@ def generar_pdf_informe(planchas_usadas, imagenes_list):
     story.append(Paragraph("Plano de Corte Guillotina y Hoja de Ruta para Taller", subtitle_style))
     story.append(Spacer(1, 15))
 
-    # Resumen general en tabla
     data_resumen = [["Plancha / Retazo", "Dimensiones (mm)", "Aprovechamiento", "Merma"]]
     for idx, (p_data, (img_buf, ap, me)) in enumerate(zip(planchas_usadas, imagenes_list), start=1):
         info = p_data["info"]
@@ -363,7 +381,6 @@ def generar_pdf_informe(planchas_usadas, imagenes_list):
     story.append(t_resumen)
     story.append(Spacer(1, 15))
 
-    # Agregar imágenes de los planos técnicos al PDF
     for idx, (p_data, (img_buf, ap, me)) in enumerate(zip(planchas_usadas, imagenes_list), start=1):
         img_buf.seek(0)
         story.append(Paragraph(f"<b>Plano de Corte #{idx}: {p_data['info']['nombre']}</b>", styles['Heading2']))
@@ -404,7 +421,6 @@ if st.button("🚀 Optimizar Cortes y Generar Informe", type="primary"):
 
                 st.image(img_buf, use_container_width=True)
 
-            # BOTÓN DE EXPORTAR EN PDF
             st.markdown("---")
             pdf_data = generar_pdf_informe(planchas_usadas, imagenes_list)
             st.download_button(
