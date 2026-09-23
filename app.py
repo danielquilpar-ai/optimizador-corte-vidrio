@@ -16,17 +16,17 @@ st.set_page_config(page_title="Optimizador de Corte de Vidrio", layout="wide")
 st.title("🪟 Optimizador de Corte de Vidrio Profesional")
 
 # ---------------------------------------------------------
-# BARRA LATERAL: PLANCHA MADRE Y RETAZOS DE ALMACÉN
+# BARRA LATERAL: PLANCHA BASE Y RETAZOS DE ALMACÉN
 # ---------------------------------------------------------
-st.sidebar.header("1. Plancha Madre (Vidrio Base)")
-plancha_w = st.sidebar.number_input("Ancho de la plancha madre (mm)", value=3300, step=100)
-plancha_h = st.sidebar.number_input("Alto de la plancha madre (mm)", value=2140, step=100)
-cantidad_planchas = st.sidebar.number_input("Cantidad de planchas madre disponibles", value=5, min_value=1)
+st.sidebar.header("1. Plancha Base")
+plancha_w = st.sidebar.number_input("Ancho de la plancha (mm)", value=3300, step=100)
+plancha_h = st.sidebar.number_input("Alto de la plancha (mm)", value=2140, step=100)
+cantidad_planchas = st.sidebar.number_input("Cantidad de planchas disponibles", value=5, min_value=1)
 permitir_rotacion = st.sidebar.checkbox("Permitir rotar piezas (90°)", value=True)
 
 st.sidebar.markdown("---")
 st.sidebar.header("2. Retazos de Almacén (Opcional)")
-st.sidebar.write("Agrega sobrantes para usarlos antes que las planchas madre:")
+st.sidebar.write("Agrega sobrantes para usarlos antes que las planchas:")
 
 if "retazos" not in st.session_state:
     st.session_state.retazos = [
@@ -38,7 +38,7 @@ retazos_editados = st.sidebar.data_editor(
     st.session_state.retazos,
     num_rows="dynamic",
     column_config={
-        "etiqueta": st.column_config.TextColumn("Identificador", default="R1", required=True),
+        "etiqueta": st.column_config.TextColumn("Identificador / Nombre", default="R1", required=True),
         "ancho": st.column_config.NumberColumn("Ancho (mm)", min_value=10, default=1000, required=True),
         "alto": st.column_config.NumberColumn("Alto (mm)", min_value=10, default=1000, required=True),
         "cantidad": st.column_config.NumberColumn("Cant.", min_value=1, default=1, step=1, required=True),
@@ -174,6 +174,7 @@ def optimizar_corte_completo(plancha_w, plancha_h, max_planchas, permitir_rot, p
     piezas_pendientes.sort(key=lambda p: p["area"], reverse=True)
     planchas_usadas = []
 
+    # PASO 1: Procesar Retazos con el nombre asignado por el usuario
     if retazos:
         for ret in retazos:
             if not ret or not isinstance(ret, dict) or len(piezas_pendientes) == 0:
@@ -194,10 +195,11 @@ def optimizar_corte_completo(plancha_w, plancha_h, max_planchas, permitir_rot, p
                     planchas_usadas.append({
                         "colocadas": colocadas,
                         "cortes": cortes,
-                        "info": {"tipo": "Retazo", "nombre": rtag, "w": rw, "h": rh}
+                        "info": {"tipo": "Retazo", "nombre": f"Retazo ({rtag})", "w": rw, "h": rh}
                     })
                     piezas_pendientes = pendientes
 
+    # PASO 2: Procesar Planchas
     for i in range(max_planchas):
         if len(piezas_pendientes) == 0:
             break
@@ -206,7 +208,7 @@ def optimizar_corte_completo(plancha_w, plancha_h, max_planchas, permitir_rot, p
             planchas_usadas.append({
                 "colocadas": colocadas,
                 "cortes": cortes,
-                "info": {"tipo": "Plancha Madre", "nombre": f"Plancha Madre #{i+1}", "w": plancha_w, "h": plancha_h}
+                "info": {"tipo": "Plancha", "nombre": f"Plancha #{i+1}", "w": plancha_w, "h": plancha_h}
             })
             piezas_pendientes = pendientes
 
@@ -245,7 +247,6 @@ def generar_imagen_plano(plancha_data, index_num):
         rect_pieza = patches.Rectangle((x, y), w, h, linewidth=1, edgecolor='#333333', facecolor=tag_color_map[rect.tag], alpha=0.85)
         ax.add_patch(rect_pieza)
 
-        # TEXTO LIMPIO SIN LÍNEA DE ROTACIÓN
         texto_medidas = f"Corte: {w} x {h} mm"
 
         ax.text(
@@ -309,8 +310,7 @@ def generar_imagen_plano(plancha_data, index_num):
     ax.set_ylim(-margin_y*1.5, b_h + margin_y*0.5)
     ax.set_aspect('equal')
     
-    titulo_tipo = f"RETAZO DE ALMACÉN: {info['nombre']}" if es_retazo else f"PLANCHA MADRE #{index_num}"
-    plt.title(f"{titulo_tipo} ({b_w}x{b_h} mm) — Aprovechamiento: {aprovechamiento:.2f}% | Merma: {merma:.2f}%", fontweight='bold', pad=15)
+    plt.title(f"{info['nombre']} ({b_w}x{b_h} mm) — Aprovechamiento: {aprovechamiento:.2f}% | Merma: {merma:.2f}%", fontweight='bold', pad=15)
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -399,7 +399,7 @@ if st.button("🚀 Optimizar Cortes y Generar Informe", type="primary"):
                 img_buf, ap, me = generar_imagen_plano(p_data, count_madre)
                 imagenes_list.append((img_buf, ap, me))
                 
-                if p_data["info"]["tipo"] == "Plancha Madre":
+                if p_data["info"]["tipo"] == "Plancha":
                     count_madre += 1
 
                 st.image(img_buf, use_container_width=True)
