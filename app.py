@@ -1,44 +1,56 @@
 import io
 import streamlit as st
-import rectpack
-from rectpack import PackingMode, PackingBin, newPacker, GuillotineBssfSas, GuillotineSplitSlas
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
 
 # ---------------------------------------------------------
 # CONFIGURACIÓN DE LA PÁGINA WEB
 # ---------------------------------------------------------
 st.set_page_config(page_title="Optimizador de Corte de Vidrio", layout="wide")
-st.title("🪟 Optimizador de Corte de Vidrio profesional")
+st.title("🪟 Optimizador de Corte de Vidrio Profesional")
 
 # ---------------------------------------------------------
-# BARRA LATERAL: INGRESO DE DATOS DE LA PLANCHA MADRE
+# BARRA LATERAL: PLANCHA MADRE Y RETAZOS DE ALMACÉN
 # ---------------------------------------------------------
 st.sidebar.header("1. Plancha Madre (Vidrio Base)")
-plancha_w = st.sidebar.number_input("Ancho de la plancha (mm)", value=3300, step=100)
-plancha_h = st.sidebar.number_input("Alto de la plancha (mm)", value=2440, step=100)
-cantidad_planchas = st.sidebar.number_input("Cantidad de planchas disponibles", value=5, min_value=1)
+plancha_w = st.sidebar.number_input("Ancho de la plancha madre (mm)", value=3300, step=100)
+plancha_h = st.sidebar.number_input("Alto de la plancha madre (mm)", value=2140, step=100)
+cantidad_planchas = st.sidebar.number_input("Cantidad de planchas madre disponibles", value=5, min_value=1)
 permitir_rotacion = st.sidebar.checkbox("Permitir rotar piezas (90°)", value=True)
+
+st.sidebar.markdown("---")
+st.sidebar.header("2. Retazos de Almacén (Opcional)")
+st.sidebar.write("Agrega sobrantes para usarlos antes que las planchas madre:")
+
+if "retazos" not in st.session_state:
+    st.session_state.retazos = [
+        {"etiqueta": "R1", "ancho": 1500, "alto": 1000, "cantidad": 1},
+        {"etiqueta": "R2", "ancho": 1650, "alto": 2100, "cantidad": 1}
+    ]
+
+retazos_editados = st.sidebar.data_editor(
+    st.session_state.retazos,
+    num_rows="dynamic",
+    column_config={
+        "etiqueta": st.column_config.TextColumn("Identificador", default="R1", required=True),
+        "ancho": st.column_config.NumberColumn("Ancho (mm)", min_value=10, default=1000, required=True),
+        "alto": st.column_config.NumberColumn("Alto (mm)", min_value=10, default=1000, required=True),
+        "cantidad": st.column_config.NumberColumn("Cant.", min_value=1, default=1, step=1, required=True),
+    },
+    use_container_width=True,
+    key="editor_retazos"
+)
 
 # ---------------------------------------------------------
 # ÁREA PRINCIPAL: LISTA DE VIDRIOS A OPTIMIZAR
 # ---------------------------------------------------------
-st.subheader("2. Lista de vidrios a optimizar")
+st.subheader("3. Lista de vidrios a optimizar")
 
 if "pedidos" not in st.session_state:
     st.session_state.pedidos = [
-        {"etiqueta": "V1", "ancho": 1190, "alto": 665, "cantidad": 1},
-        {"etiqueta": "V1", "ancho": 1160, "alto": 650, "cantidad": 2},
-        {"etiqueta": "V1", "ancho": 2300, "alto": 350, "cantidad": 1},
-        {"etiqueta": "V1", "ancho": 665, "alto": 1190, "cantidad": 1},
+        {"etiqueta": "M1", "ancho": 890, "alto": 2380, "cantidad": 2},
     ]
 
-# Tabla interactiva para modificar/agregar piezas
 edited_data = st.data_editor(
     st.session_state.pedidos,
     num_rows="dynamic",
@@ -48,44 +60,172 @@ edited_data = st.data_editor(
         "alto": st.column_config.NumberColumn("Alto (mm)", min_value=10, required=True),
         "cantidad": st.column_config.NumberColumn("Cantidad", min_value=1, step=1, required=True),
     },
-    use_container_width=True
+    use_container_width=True,
+    key="editor_pedidos"
 )
 
 # ---------------------------------------------------------
-# FUNCIONES DE OPTIMIZACIÓN Y GRÁFICOS
+# CLASE Y ESTRUCTURA DE DATOS
 # ---------------------------------------------------------
-def optimizar_cortes(plancha_w, plancha_h, max_bins, rotacion, pedidos):
-    # Inicialización del algoritmo de empaquetado
-    packer = newPacker(
-        mode=PackingMode.Selecting,
-        pack_algo=rectpack.guillotine.GuillotineBssfSas if hasattr(rectpack, 'guillotine') else rectpack.MaxRectsBssf,
-        rotation=rotacion
-    )
-    packer.add_bin(plancha_w, plancha_h, count=max_bins)
+class Rectangulo:
+    def __init__(self, x, y, w, h, tag, orig_w, orig_h, rotado):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.tag = tag
+        self.orig_w = orig_w
+        self.orig_h = orig_h
+        self.rotado = rotado
 
+def empaquetar_en_plancha(bin_w, bin_h, piezas, permitir_rot):
+    piezas_colocadas = []
+    piezas_no_colocadas = []
+    cortes_guillotina = []
+
+    # Detectar ancho máximo del bloque de piezas colocadas
+    max_x_bloque = 0
+    piezas_temp = []
+
+    # Agrupar y posicionar piezas optimizando el bloque principal
+    espacios_libres = [(0, 0, bin_w, bin_h)]
+
+    for p in piezas:
+        pw, ph = p["w"], p["h"]
+        tag = p["tag"]
+        colocada = False
+
+        orientaciones = [(pw, ph, False)]
+        if permitir_rot and pw != ph:
+            orientaciones.append((ph, pw, True))
+
+        for idx_e, (ex, ey, ew, eh) in enumerate(espacios_libres):
+            for w_eval, h_eval, es_rot in orientaciones:
+                if w_eval <= ew and h_eval <= eh:
+                    rect = Rectangulo(ex, ey, w_eval, h_eval, tag, pw, ph, es_rot)
+                    piezas_temp.append(rect)
+                    espacios_libres.pop(idx_e)
+
+                    if ex + w_eval > max_x_bloque:
+                        max_x_bloque = ex + w_eval
+
+                    # Crear espacios derivados dentro de la columna
+                    if ew - w_eval > 0:
+                        espacios_libres.append((ex + w_eval, ey, ew - w_eval, h_eval))
+                    if eh - h_eval > 0:
+                        espacios_libres.append((ex, ey + h_eval, ew, eh - h_eval))
+
+                    espacios_libres.sort(key=lambda s: (s[0], s[1]))
+                    colocada = True
+                    break
+            if colocada:
+                break
+
+        if not colocada:
+            piezas_no_colocadas.append(p)
+
+    if not piezas_temp:
+        return [], piezas, []
+
+    piezas_colocadas = piezas_temp
+
+    # GENERAR CORTES ESTRUCTURADOS PARA PROTEGER RETAZOS (R1 y R2)
+    # CORTE 1: Corte Vertical Maestro que aísla el Retazo R1
+    if max_x_bloque < bin_w:
+        cortes_guillotina.append({
+            "tipo": "V",
+            "x": max_x_bloque,
+            "y1": 0,
+            "y2": bin_h,
+            "etiqueta_retazo": "R1"
+        })
+
+    # CORTES SECUNDARIOS: Horizontales acotados dentro del bloque útil
+    y_cortes = set()
+    for rect in piezas_colocadas:
+        if rect.y + rect.h < bin_h:
+            y_cortes.add(rect.y + rect.h)
+
+    for y_c in sorted(y_cortes):
+        cortes_guillotina.append({
+            "tipo": "H",
+            "y": y_c,
+            "x1": 0,
+            "x2": max_x_bloque,
+            "etiqueta_retazo": "R2"
+        })
+
+    return piezas_colocadas, piezas_no_colocadas, cortes_guillotina
+
+def optimizar_corte_completo(plancha_w, plancha_h, max_planchas, permitir_rot, pedidos, retazos):
+    piezas_pendientes = []
     for item in pedidos:
         if not item or not isinstance(item, dict):
             continue
-        tag = item.get("etiqueta", "Pieza")
+        tag = str(item.get("etiqueta") or "V")
         w = int(item.get("ancho") or 0)
         h = int(item.get("alto") or 0)
         cant = int(item.get("cantidad") or 1)
         if w > 0 and h > 0:
             for _ in range(cant):
-                rid_info = f"{tag}|{w}|{h}"
-                packer.add_rect(w, h, rid=rid_info)
+                piezas_pendientes.append({"w": w, "h": h, "tag": tag, "area": w * h})
 
-    packer.pack()
-    return packer
+    piezas_pendientes.sort(key=lambda p: p["area"], reverse=True)
+    planchas_usadas = []
 
-def generar_imagen_plano(abin, plancha_w, plancha_h, num_plancha):
+    if retazos:
+        for ret in retazos:
+            if not ret or not isinstance(ret, dict) or len(piezas_pendientes) == 0:
+                continue
+            rw = int(ret.get("ancho") or 0)
+            rh = int(ret.get("alto") or 0)
+            rcant = int(ret.get("cantidad") or 1)
+            rtag = str(ret.get("etiqueta") or "Retazo")
+
+            if rw <= 0 or rh <= 0:
+                continue
+
+            for _ in range(rcant):
+                if len(piezas_pendientes) == 0:
+                    break
+                colocadas, pendientes, cortes = empaquetar_en_plancha(rw, rh, piezas_pendientes, permitir_rot)
+                if len(colocadas) > 0:
+                    planchas_usadas.append({
+                        "colocadas": colocadas,
+                        "cortes": cortes,
+                        "info": {"tipo": "Retazo", "nombre": rtag, "w": rw, "h": rh}
+                    })
+                    piezas_pendientes = pendientes
+
+    for i in range(max_planchas):
+        if len(piezas_pendientes) == 0:
+            break
+        colocadas, pendientes, cortes = empaquetar_en_plancha(plancha_w, plancha_h, piezas_pendientes, permitir_rot)
+        if len(colocadas) > 0:
+            planchas_usadas.append({
+                "colocadas": colocadas,
+                "cortes": cortes,
+                "info": {"tipo": "Plancha Madre", "nombre": f"Plancha Madre #{i+1}", "w": plancha_w, "h": plancha_h}
+            })
+            piezas_pendientes = pendientes
+
+    return planchas_usadas, piezas_pendientes
+
+# ---------------------------------------------------------
+# GENERACIÓN DE PLANO PROFESIONAL
+# ---------------------------------------------------------
+def generar_imagen_plano(plancha_data, index_num):
+    colocadas = plancha_data["colocadas"]
+    cortes = plancha_data["cortes"]
+    info = plancha_data["info"]
+    b_w, b_h = info["w"], info["h"]
+    es_retazo = info["tipo"] == "Retazo"
+
     fig, ax = plt.subplots(figsize=(11, 7))
-
-    # Ocultar ejes X / Y tradicionales
     ax.axis('off')
 
-    # Plancha Madre Base
-    rect_madre = patches.Rectangle((0, 0), plancha_w, plancha_h, linewidth=2, edgecolor='black', facecolor='#F5F6F8')
+    color_fondo = '#FFF3E0' if es_retazo else '#F5F6F8'
+    rect_madre = patches.Rectangle((0, 0), b_w, b_h, linewidth=2, edgecolor='black', facecolor=color_fondo)
     ax.add_patch(rect_madre)
 
     colores = ['#4E79A7', '#F28E2B', '#E15759', '#76B7B2', '#59A14F', '#EDC948', '#B07AA1']
@@ -93,147 +233,113 @@ def generar_imagen_plano(abin, plancha_w, plancha_h, num_plancha):
     tag_color_map = {}
     color_idx = 0
 
-    cortes_x = set([0, plancha_w])
-    cortes_y = set([0, plancha_h])
-
-    for rect in abin:
-        x, y, w, h = rect.x, rect.y, rect.width, rect.height
-        
-        cortes_x.add(x)
-        cortes_x.add(x + w)
-        cortes_y.add(y)
-        cortes_y.add(y + h)
-
-        rid_str = str(rect.rid)
-        if "|" in rid_str:
-            parts = rid_str.split("|")
-            rid = parts[0]
-            w_orig, h_orig = int(parts[1]), int(parts[2])
-        else:
-            rid = rid_str
-            w_orig, h_orig = w, h
-
+    for rect in colocadas:
+        x, y, w, h = rect.x, rect.y, rect.w, rect.h
         area_usada += (w * h)
 
-        if rid not in tag_color_map:
-            tag_color_map[rid] = colores[color_idx % len(colores)]
+        if rect.tag not in tag_color_map:
+            tag_color_map[rect.tag] = colores[color_idx % len(colores)]
             color_idx += 1
 
-        # Pieza trazada
-        rect_pieza = patches.Rectangle((x, y), w, h, linewidth=1.2, edgecolor='#1E1E1E', facecolor=tag_color_map[rid], alpha=0.85)
+        rect_pieza = patches.Rectangle((x, y), w, h, linewidth=1, edgecolor='#333333', facecolor=tag_color_map[rect.tag], alpha=0.85)
         ax.add_patch(rect_pieza)
 
-        # Etiqueta de la pieza
-        if (w == w_orig and h == h_orig):
-            texto_medidas = f"Corte: {w} x {h} mm"
-        else:
-            texto_medidas = f"Corte: {w} x {h} mm\n(Rotado, Orig: {w_orig}x{h_orig})"
+        texto_medidas = f"Corte: {w} x {h} mm" if not rect.rotado else f"Corte: {w} x {h} mm\n(Rotado, Orig: {rect.orig_w}x{rect.orig_h})"
 
         ax.text(
-            x + w/2, y + h/2, f"{rid}\n{texto_medidas}",
+            x + w/2, y + h/2, f"{rect.tag}\n{texto_medidas}",
             color='white', weight='bold', fontsize=8, ha='center', va='center',
-            bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.6)
+            bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.65)
         )
 
-    # ---------------------------------------------------------
-    # PROYECCIÓN DE LÍNEAS ROJAS DE CORTE CONTINUO (GUILLOTINA)
-    # ---------------------------------------------------------
-    for cx in sorted(cortes_x):
-        if 0 < cx < plancha_w:
-            ax.plot([cx, cx], [0, plancha_h], color='red', linestyle='--', linewidth=1, alpha=0.75)
+    # TRAZADO DE CORTES ESTRUCTURADOS CON NUMERACIÓN LIMPIA
+    for num, c in enumerate(cortes, start=1):
+        if c["tipo"] == "V":
+            x = c["x"]
+            y1, y2 = c["y1"], c["y2"]
+            ax.plot([x, x], [y1, y2], color='#0055FF', linestyle='-', linewidth=2.5, alpha=0.9)
+            
+            # Números de corte en los extremos
+            ax.text(x, y1 - (b_h*0.03), str(num), color='white', weight='bold', fontsize=9, ha='center', va='center',
+                    bbox=dict(boxstyle="circle,pad=0.3", fc="#0055FF", ec="black", lw=1))
+            ax.text(x, y2 + (b_h*0.03), str(num), color='white', weight='bold', fontsize=9, ha='center', va='center',
+                    bbox=dict(boxstyle="circle,pad=0.3", fc="#0055FF", ec="black", lw=1))
 
-    for cy in sorted(cortes_y):
-        if 0 < cy < plancha_h:
-            ax.plot([0, plancha_w], [cy, cy], color='red', linestyle='--', linewidth=1, alpha=0.75)
+        elif c["tipo"] == "H":
+            y = c["y"]
+            x1, x2 = c["x1"], c["x2"]
+            ax.plot([x1, x2], [y, y], color='#0055FF', linestyle='-', linewidth=2.5, alpha=0.9)
+            
+            # Números de corte en los extremos acotados
+            ax.text(x1 - (b_w*0.015), y, str(num), color='white', weight='bold', fontsize=9, ha='center', va='center',
+                    bbox=dict(boxstyle="circle,pad=0.3", fc="#0055FF", ec="black", lw=1))
+            ax.text(x2 + (b_w*0.015), y, str(num), color='white', weight='bold', fontsize=9, ha='center', va='center',
+                    bbox=dict(boxstyle="circle,pad=0.3", fc="#0055FF", ec="black", lw=1))
 
-    # ---------------------------------------------------------
-    # ACOTADO TÉCNICO (MEDIDAS GENERALES DE LA PLANCHA)
-    # ---------------------------------------------------------
-    margin_x = plancha_w * 0.08
-    margin_y = plancha_h * 0.08
+    # Identificar visualmente los Retazos Limpios R1 y R2 si existen
+    if len(cortes) > 0:
+        v_corte = next((c for c in cortes if c["tipo"] == "V"), None)
+        if v_corte:
+            x_r1 = (v_corte["x"] + b_w) / 2
+            y_r1 = b_h / 2
+            ancho_r1 = int(b_w - v_corte["x"])
+            if ancho_r1 > 100:
+                ax.text(x_r1, y_r1, f"RETAZO R1\n({ancho_r1} x {b_h} mm)", color='#888888', weight='bold', fontsize=12, ha='center', va='center')
 
-    # Cota Ancho Plancha (Abajo)
+    # Acotado exterior
+    margin_x = b_w * 0.08
+    margin_y = b_h * 0.08
+
     ax.annotate(
-        '', xy=(0, -margin_y*0.4), xytext=(plancha_w, -margin_y*0.4),
+        '', xy=(0, -margin_y*0.4), xytext=(b_w, -margin_y*0.4),
         arrowprops=dict(arrowstyle='<->', color='black', lw=1.5)
     )
-    ax.text(plancha_w/2, -margin_y*0.7, f"Ancho Plancha: {plancha_w} mm", ha='center', va='top', fontsize=10, fontweight='bold')
+    ax.text(b_w/2, -margin_y*0.7, f"Ancho: {b_w} mm", ha='center', va='top', fontsize=10, fontweight='bold')
 
-    # Cota Alto Plancha (Izquierda)
     ax.annotate(
-        '', xy=(-margin_x*0.4, 0), xytext=(-margin_x*0.4, plancha_h),
+        '', xy=(-margin_x*0.4, 0), xytext=(-margin_x*0.4, b_h),
         arrowprops=dict(arrowstyle='<->', color='black', lw=1.5)
     )
-    ax.text(-margin_x*0.7, plancha_h/2, f"Alto Plancha: {plancha_h} mm", ha='right', va='center', rotation=90, fontsize=10, fontweight='bold')
+    ax.text(-margin_x*0.7, b_h/2, f"Alto: {b_h} mm", ha='right', va='center', rotation=90, fontsize=10, fontweight='bold')
 
-    aprovechamiento = (area_usada / (plancha_w * plancha_h)) * 100
+    aprovechamiento = (area_usada / (b_w * b_h)) * 100
     merma = 100 - aprovechamiento
 
-    ax.set_xlim(-margin_x*1.5, plancha_w + margin_x*0.5)
-    ax.set_ylim(-margin_y*1.5, plancha_h + margin_y*0.5)
+    ax.set_xlim(-margin_x*1.5, b_w + margin_x*0.5)
+    ax.set_ylim(-margin_y*1.5, b_h + margin_y*0.5)
     ax.set_aspect('equal')
-    plt.title(f"Plancha #{num_plancha} — Aprovechamiento: {aprovechamiento:.2f}% | Merma: {merma:.2f}%", fontweight='bold', pad=15)
+    
+    titulo_tipo = f"RETAZO DE ALMACÉN: {info['nombre']}" if es_retazo else f"PLANCHA MADRE #{index_num}"
+    plt.title(f"{titulo_tipo} ({b_w}x{b_h} mm) — Aprovechamiento: {aprovechamiento:.2f}% | Merma: {merma:.2f}%", fontweight='bold', pad=15)
     plt.tight_layout()
 
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=200, bbox_inches='tight')
     plt.close(fig)
     buf.seek(0)
-    return buf, aprovechamiento, merma
+    return buf
 
 # ---------------------------------------------------------
-# FUNCIÓN DE GENERACIÓN DE PDF
-# ---------------------------------------------------------
-def generar_pdf_reporte(packer, plancha_w, plancha_h):
-    pdf_buffer = io.BytesIO()
-    doc = SimpleDocTemplate(pdf_buffer, pagesize=landscape(A4), rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-    elements = []
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor('#1A365D'), spaceAfter=10)
-    subtitle_style = ParagraphStyle('SubTitleStyle', parent=styles['Normal'], fontSize=10, textColor=colors.gray, spaceAfter=15)
-
-    elements.append(Paragraph("Hoja de Optimización y Esquema de Corte de Vidrio", title_style))
-    elements.append(Paragraph(f"Dimensiones Plancha Madre: {plancha_w} x {plancha_h} mm", subtitle_style))
-
-    for i, abin in enumerate(packer):
-        if len(abin) == 0:
-            continue
-        
-        img_buf, aprovechamiento, merma = generar_imagen_plano(abin, plancha_w, plancha_h, i + 1)
-        
-        elements.append(Paragraph(f"<b>Plancha #{i + 1}</b> — Aprovechamiento: <b>{aprovechamiento:.2f}%</b> (Merma: {merma:.2f}%)", styles['Heading2']))
-        elements.append(Spacer(1, 5))
-        
-        elements.append(Image(img_buf, width=700, height=350))
-        elements.append(Spacer(1, 15))
-
-    doc.build(elements)
-    pdf_buffer.seek(0)
-    return pdf_buffer
-
-# ---------------------------------------------------------
-# BOTÓN Y EJECUCIÓN
+# EJECUCIÓN
 # ---------------------------------------------------------
 if st.button("🚀 Optimizar Cortes y Generar Informe", type="primary"):
-    with st.spinner("Calculando plano óptimo de corte guillotina..."):
-        packer = optimizar_cortes(plancha_w, plancha_h, cantidad_planchas, permitir_rotacion, edited_data)
-        
-        planchas_usadas = [b for b in packer if len(b) > 0]
-        
+    with st.spinner("Calculando plano con protección de retazos principales..."):
+        planchas_usadas, no_colocadas = optimizar_corte_completo(
+            plancha_w, plancha_h, cantidad_planchas, permitir_rotacion, edited_data, retazos_editados
+        )
+
         if len(planchas_usadas) == 0:
-            st.error("No se pudieron empaquetar las piezas. Verifique que el tamaño de las piezas sea menor al de la plancha madre.")
+            st.error("No se pudo ubicar ninguna pieza. Verifica las medidas introducidas.")
         else:
-            st.success(f"¡Optimización completada! Se requieren **{len(planchas_usadas)}** plancha(s) madre.")
+            st.success(f"¡Optimización completada con éxito! Se usaron **{len(planchas_usadas)}** vidrio(s) en total.")
 
-            for i, abin in enumerate(planchas_usadas):
-                img_buf, aprovechamiento, merma = generar_imagen_plano(abin, plancha_w, plancha_h, i + 1)
-                st.image(img_buf, caption=f"Esquema de Corte - Plancha {i+1}", use_container_width=True)
+            if len(no_colocadas) > 0:
+                st.warning(f"⚠️ Atención: Quedaron **{len(no_colocadas)}** pieza(s) sin cortar por falta de espacio.")
 
-            pdf_data = generar_pdf_reporte(packer, plancha_w, plancha_h)
-            st.download_button(
-                label="📄 Descargar Planos de Corte en PDF",
-                data=pdf_data,
-                file_name="Planos_de_Corte_Vidrio.pdf",
-                mime="application/pdf"
-            )
+            count_madre = 1
+            for p_data in planchas_usadas:
+                img_buf = generar_imagen_plano(p_data, count_madre)
+                if p_data["info"]["tipo"] == "Plancha Madre":
+                    count_madre += 1
+
+                st.image(img_buf, use_container_width=True)
